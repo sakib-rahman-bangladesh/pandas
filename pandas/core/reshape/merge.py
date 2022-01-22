@@ -26,7 +26,6 @@ from pandas._libs import (
 from pandas._typing import (
     ArrayLike,
     DtypeObj,
-    FrameOrSeries,
     IndexLabel,
     Suffixes,
     npt,
@@ -36,7 +35,9 @@ from pandas.util._decorators import (
     Appender,
     Substitution,
 )
+from pandas.util._exceptions import find_stack_level
 
+from pandas.core.dtypes.cast import find_common_type
 from pandas.core.dtypes.common import (
     ensure_float64,
     ensure_int64,
@@ -194,7 +195,7 @@ def merge_ordered(
     how: str = "outer",
 ) -> DataFrame:
     """
-    Perform merge with optional filling/interpolation.
+    Perform a merge for ordered data with optional filling/interpolation.
 
     Designed for ordered data like time series data. Optionally
     perform group-wise merge (see examples).
@@ -339,7 +340,7 @@ def merge_asof(
     direction: str = "backward",
 ) -> DataFrame:
     """
-    Perform an asof merge.
+    Perform a merge by key distance.
 
     This is similar to a left-join except that we match on nearest
     key rather than equal keys. Both DataFrames must be sorted by the key.
@@ -676,7 +677,7 @@ class _MergeOperation:
             )
             # stacklevel chosen to be correct when this is reached via pd.merge
             # (and not DataFrame.join)
-            warnings.warn(msg, FutureWarning, stacklevel=3)
+            warnings.warn(msg, FutureWarning, stacklevel=find_stack_level())
 
         self._validate_specification()
 
@@ -819,6 +820,7 @@ class _MergeOperation:
             if (
                 self.orig_left._is_level_reference(left_key)
                 and self.orig_right._is_level_reference(right_key)
+                and left_key == right_key
                 and name not in result.index.names
             ):
 
@@ -912,7 +914,7 @@ class _MergeOperation:
                     result_dtype = lvals.dtype
                 else:
                     key_col = Index(lvals).where(~mask_left, rvals)
-                    result_dtype = lvals.dtype
+                    result_dtype = find_common_type([lvals.dtype, rvals.dtype])
 
                 if result._is_label_reference(name):
                     result[name] = Series(
@@ -1280,10 +1282,12 @@ class _MergeOperation:
             # incompatible dtypes. See GH 16900.
             if name in self.left.columns:
                 typ = lk.categories.dtype if lk_is_cat else object
-                self.left = self.left.assign(**{name: self.left[name].astype(typ)})
+                self.left = self.left.copy()
+                self.left[name] = self.left[name].astype(typ)
             if name in self.right.columns:
                 typ = rk.categories.dtype if rk_is_cat else object
-                self.right = self.right.assign(**{name: self.right[name].astype(typ)})
+                self.right = self.right.copy()
+                self.right[name] = self.right[name].astype(typ)
 
     def _create_cross_configuration(
         self, left: DataFrame, right: DataFrame
@@ -1645,16 +1649,13 @@ class _OrderedMerge(_MergeOperation):
         right_join_indexer: np.ndarray | None
 
         if self.fill_method == "ffill":
-            # error: Argument 1 to "ffill_indexer" has incompatible type
-            # "Optional[ndarray]"; expected "ndarray"
-            left_join_indexer = libjoin.ffill_indexer(
-                left_indexer  # type: ignore[arg-type]
+            if left_indexer is None:
+                raise TypeError("left_indexer cannot be None")
+            left_indexer, right_indexer = cast(np.ndarray, left_indexer), cast(
+                np.ndarray, right_indexer
             )
-            # error: Argument 1 to "ffill_indexer" has incompatible type
-            # "Optional[ndarray]"; expected "ndarray"
-            right_join_indexer = libjoin.ffill_indexer(
-                right_indexer  # type: ignore[arg-type]
-            )
+            left_join_indexer = libjoin.ffill_indexer(left_indexer)
+            right_join_indexer = libjoin.ffill_indexer(right_indexer)
         else:
             left_join_indexer = left_indexer
             right_join_indexer = right_indexer
@@ -1780,21 +1781,27 @@ class _AsOfMerge(_OrderedMerge):
         # GH#29130 Check that merge keys do not have dtype object
         if not self.left_index:
             left_on = self.left_on[0]
-            lo_dtype = (
-                self.left[left_on].dtype
-                if left_on in self.left.columns
-                else self.left.index.get_level_values(left_on)
-            )
+            if is_array_like(left_on):
+                lo_dtype = left_on.dtype
+            else:
+                lo_dtype = (
+                    self.left[left_on].dtype
+                    if left_on in self.left.columns
+                    else self.left.index.get_level_values(left_on)
+                )
         else:
             lo_dtype = self.left.index.dtype
 
         if not self.right_index:
             right_on = self.right_on[0]
-            ro_dtype = (
-                self.right[right_on].dtype
-                if right_on in self.right.columns
-                else self.right.index.get_level_values(right_on)
-            )
+            if is_array_like(right_on):
+                ro_dtype = right_on.dtype
+            else:
+                ro_dtype = (
+                    self.right[right_on].dtype
+                    if right_on in self.right.columns
+                    else self.right.index.get_level_values(right_on)
+                )
         else:
             ro_dtype = self.right.index.dtype
 
@@ -2141,15 +2148,11 @@ def _factorize_keys(
         rk = ensure_int64(rk.codes)
 
     elif isinstance(lk, ExtensionArray) and is_dtype_equal(lk.dtype, rk.dtype):
-        # error: Incompatible types in assignment (expression has type "ndarray",
-        # variable has type "ExtensionArray")
         lk, _ = lk._values_for_factorize()
 
-        # error: Incompatible types in assignment (expression has type
-        # "ndarray", variable has type "ExtensionArray")
         # error: Item "ndarray" of "Union[Any, ndarray]" has no attribute
         # "_values_for_factorize"
-        rk, _ = rk._values_for_factorize()  # type: ignore[union-attr,assignment]
+        rk, _ = rk._values_for_factorize()  # type: ignore[union-attr]
 
     klass: type[libhashtable.Factorizer] | type[libhashtable.Int64Factorizer]
     if is_integer_dtype(lk.dtype) and is_integer_dtype(rk.dtype):
@@ -2172,10 +2175,16 @@ def _factorize_keys(
 
     rizer = klass(max(len(lk), len(rk)))
 
-    llab = rizer.factorize(lk)
-    rlab = rizer.factorize(rk)
-    assert llab.dtype == np.intp, llab.dtype
-    assert rlab.dtype == np.intp, rlab.dtype
+    # Argument 1 to "factorize" of "ObjectFactorizer" has incompatible type
+    # "Union[ndarray[Any, dtype[signedinteger[_64Bit]]],
+    # ndarray[Any, dtype[object_]]]"; expected "ndarray[Any, dtype[object_]]"
+    llab = rizer.factorize(lk)  # type: ignore[arg-type]
+    # Argument 1 to "factorize" of "ObjectFactorizer" has incompatible type
+    # "Union[ndarray[Any, dtype[signedinteger[_64Bit]]],
+    # ndarray[Any, dtype[object_]]]"; expected "ndarray[Any, dtype[object_]]"
+    rlab = rizer.factorize(rk)  # type: ignore[arg-type]
+    assert llab.dtype == np.dtype(np.intp), llab.dtype
+    assert rlab.dtype == np.dtype(np.intp), rlab.dtype
 
     count = rizer.get_count()
 
@@ -2258,7 +2267,7 @@ def _any(x) -> bool:
     return x is not None and com.any_not_none(*x)
 
 
-def _validate_operand(obj: FrameOrSeries) -> DataFrame:
+def _validate_operand(obj: DataFrame | Series) -> DataFrame:
     if isinstance(obj, ABCDataFrame):
         return obj
     elif isinstance(obj, ABCSeries):
@@ -2289,7 +2298,7 @@ def _items_overlap_with_suffix(
             "unexpected results. Provide 'suffixes' as a tuple instead. In the "
             "future a 'TypeError' will be raised.",
             FutureWarning,
-            stacklevel=4,
+            stacklevel=find_stack_level(),
         )
 
     to_rename = left.intersection(right)
@@ -2339,7 +2348,7 @@ def _items_overlap_with_suffix(
             f"Passing 'suffixes' which cause duplicate columns {set(dups)} in the "
             f"result is deprecated and will raise a MergeError in a future version.",
             FutureWarning,
-            stacklevel=4,
+            stacklevel=find_stack_level(),
         )
 
     return llabels, rlabels

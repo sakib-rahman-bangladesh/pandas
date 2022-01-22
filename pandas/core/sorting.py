@@ -6,6 +6,7 @@ from typing import (
     TYPE_CHECKING,
     Callable,
     DefaultDict,
+    Hashable,
     Iterable,
     Sequence,
 )
@@ -95,7 +96,9 @@ def get_indexer_indexer(
     return indexer
 
 
-def get_group_index(labels, shape: Shape, sort: bool, xnull: bool):
+def get_group_index(
+    labels, shape: Shape, sort: bool, xnull: bool
+) -> npt.NDArray[np.int64]:
     """
     For the particular label_list, gets the offsets into the hypothetical list
     representing the totally ordered cartesian product of all possible label
@@ -260,8 +263,7 @@ def decons_obs_group_ids(
         out = decons_group_index(obs_ids, shape)
         return out if xnull or not lift.any() else [x - y for x, y in zip(out, lift)]
 
-    # TODO: unique_label_indices only used here, should take ndarray[np.intp]
-    indexer = unique_label_indices(ensure_int64(comp_ids))
+    indexer = unique_label_indices(comp_ids)
     return [lab[indexer].astype(np.intp, subok=False, copy=True) for lab in labels]
 
 
@@ -352,7 +354,7 @@ def nargsort(
     ascending: bool = True,
     na_position: str = "last",
     key: Callable | None = None,
-    mask: np.ndarray | None = None,
+    mask: npt.NDArray[np.bool_] | None = None,
 ) -> npt.NDArray[np.intp]:
     """
     Intended to be a drop-in replacement for np.argsort which handles NaNs.
@@ -367,7 +369,7 @@ def nargsort(
     ascending : bool, default True
     na_position : {'first', 'last'}, default 'last'
     key : Optional[Callable], default None
-    mask : Optional[np.ndarray], default None
+    mask : Optional[np.ndarray[bool]], default None
         Passed when called by ExtensionArray.argsort.
 
     Returns
@@ -576,7 +578,7 @@ def get_flattened_list(
 
 def get_indexer_dict(
     label_list: list[np.ndarray], keys: list[Index]
-) -> dict[str | tuple, np.ndarray]:
+) -> dict[Hashable, npt.NDArray[np.intp]]:
     """
     Returns
     -------
@@ -651,7 +653,7 @@ def get_group_index_sorter(
 
 
 def compress_group_index(
-    group_index: np.ndarray, sort: bool = True
+    group_index: npt.NDArray[np.int64], sort: bool = True
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
     """
     Group_index is offsets into cartesian product of all possible labels. This

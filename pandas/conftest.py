@@ -17,6 +17,7 @@ Instead of splitting it was decided to define sections here:
 - Dtypes
 - Misc
 """
+# pyright: reportUntypedFunctionDecorator = false
 
 from collections import abc
 from datetime import (
@@ -66,6 +67,14 @@ from pandas.core.indexes.api import (
     MultiIndex,
 )
 
+try:
+    import pyarrow as pa
+except ImportError:
+    has_pyarrow = False
+else:
+    del pa
+    has_pyarrow = True
+
 # Until https://github.com/numpy/numpy/issues/19078 is sorted out, just suppress
 suppress_npdev_promotion_warning = pytest.mark.filterwarnings(
     "ignore:Promotion of numbers and bools:FutureWarning"
@@ -92,32 +101,44 @@ def pytest_addoption(parser):
     )
 
 
-def pytest_runtest_setup(item):
-    if "slow" in item.keywords and item.config.getoption("--skip-slow"):
-        pytest.skip("skipping due to --skip-slow")
+def pytest_collection_modifyitems(items, config):
+    skip_slow = config.getoption("--skip-slow")
+    only_slow = config.getoption("--only-slow")
+    skip_network = config.getoption("--skip-network")
+    skip_db = config.getoption("--skip-db")
+    run_high_memory = config.getoption("--run-high-memory")
 
-    if "slow" not in item.keywords and item.config.getoption("--only-slow"):
-        pytest.skip("skipping due to --only-slow")
+    marks = [
+        (pytest.mark.slow, "slow", skip_slow, "--skip-slow"),
+        (pytest.mark.network, "network", skip_network, "--network"),
+        (pytest.mark.db, "db", skip_db, "--skip-db"),
+    ]
 
-    if "network" in item.keywords and item.config.getoption("--skip-network"):
-        pytest.skip("skipping due to --skip-network")
-
-    if "db" in item.keywords and item.config.getoption("--skip-db"):
-        pytest.skip("skipping due to --skip-db")
-
-    if "high_memory" in item.keywords and not item.config.getoption(
-        "--run-high-memory"
-    ):
-        pytest.skip("skipping high memory test since --run-high-memory was not set")
-
-
-def pytest_collection_modifyitems(items):
     for item in items:
         # mark all tests in the pandas/tests/frame directory with "arraymanager"
         if "/frame/" in item.nodeid:
             item.add_marker(pytest.mark.arraymanager)
-
         item.add_marker(suppress_npdev_promotion_warning)
+
+        for (mark, kwd, skip_if_found, arg_name) in marks:
+            if kwd in item.keywords:
+                # If we're skipping, no need to actually add the marker or look for
+                # other markers
+                if skip_if_found:
+                    item.add_marker(pytest.mark.skip(f"skipping due to {arg_name}"))
+                    break
+
+                item.add_marker(mark)
+
+        if only_slow and "slow" not in item.keywords:
+            item.add_marker(pytest.mark.skip("skipping due to --only-slow"))
+
+        if "high_memory" in item.keywords and not run_high_memory:
+            item.add_marker(
+                pytest.mark.skip(
+                    "skipping high memory test since --run-high-memory was not set"
+                )
+            )
 
 
 # Hypothesis
@@ -230,6 +251,14 @@ def keep(request):
     return request.param
 
 
+@pytest.fixture(params=["both", "neither", "left", "right"])
+def inclusive_endpoints_fixture(request):
+    """
+    Fixture for trying all interval 'inclusive' parameters.
+    """
+    return request.param
+
+
 @pytest.fixture(params=["left", "right", "both", "neither"])
 def closed(request):
     """
@@ -246,7 +275,16 @@ def other_closed(request):
     return request.param
 
 
-@pytest.fixture(params=[None, "gzip", "bz2", "zip", "xz"])
+@pytest.fixture(
+    params=[
+        None,
+        "gzip",
+        "bz2",
+        "zip",
+        "xz",
+        pytest.param("zstd", marks=td.skip_if_no("zstandard")),
+    ]
+)
 def compression(request):
     """
     Fixture for trying common compression types in compression tests.
@@ -254,7 +292,15 @@ def compression(request):
     return request.param
 
 
-@pytest.fixture(params=["gzip", "bz2", "zip", "xz"])
+@pytest.fixture(
+    params=[
+        "gzip",
+        "bz2",
+        "zip",
+        "xz",
+        pytest.param("zstd", marks=td.skip_if_no("zstandard")),
+    ]
+)
 def compression_only(request):
     """
     Fixture for trying common compression types in compression tests excluding
@@ -312,6 +358,19 @@ def unique_nulls_fixture(request):
 # Generate cartesian product of unique_nulls_fixture:
 unique_nulls_fixture2 = unique_nulls_fixture
 
+
+@pytest.fixture(params=tm.NP_NAT_OBJECTS, ids=lambda x: type(x).__name__)
+def np_nat_fixture(request):
+    """
+    Fixture for each NaT type in numpy.
+    """
+    return request.param
+
+
+# Generate cartesian product of np_nat_fixture:
+np_nat_fixture2 = np_nat_fixture
+
+
 # ----------------------------------------------------------------
 # Classes
 # ----------------------------------------------------------------
@@ -351,6 +410,18 @@ def index_or_series_or_array(request):
     Fixture to parametrize over Index, Series, and ExtensionArray
     """
     return request.param
+
+
+@pytest.fixture(params=[Index, Series, DataFrame, pd.array], ids=lambda x: x.__name__)
+def box_with_array(request):
+    """
+    Fixture to test behavior for Index, Series, DataFrame, and pandas Array
+    classes
+    """
+    return request.param
+
+
+box_with_array2 = box_with_array
 
 
 @pytest.fixture
@@ -406,13 +477,21 @@ def multiindex_year_month_day_dataframe_random_data():
 
 
 @pytest.fixture
-def multiindex_dataframe_random_data():
-    """DataFrame with 2 level MultiIndex with random data"""
-    index = MultiIndex(
+def lexsorted_two_level_string_multiindex():
+    """
+    2-level MultiIndex, lexsorted, with string names.
+    """
+    return MultiIndex(
         levels=[["foo", "bar", "baz", "qux"], ["one", "two", "three"]],
         codes=[[0, 0, 0, 1, 1, 2, 2, 3, 3, 3], [0, 1, 2, 0, 1, 1, 2, 0, 1, 2]],
         names=["first", "second"],
     )
+
+
+@pytest.fixture
+def multiindex_dataframe_random_data(lexsorted_two_level_string_multiindex):
+    """DataFrame with 2 level MultiIndex with random data"""
+    index = lexsorted_two_level_string_multiindex
     return DataFrame(
         np.random.randn(10, 3), index=index, columns=Index(["A", "B", "C"], name="exp")
     )
@@ -478,7 +557,15 @@ indices_dict = {
     "mi-with-dt64tz-level": _create_mi_with_dt64tz_level(),
     "multi": _create_multiindex(),
     "repeats": Index([0, 0, 1, 1, 2, 2]),
+    "nullable_int": Index(np.arange(100), dtype="Int64"),
+    "nullable_uint": Index(np.arange(100), dtype="UInt16"),
+    "nullable_float": Index(np.arange(100), dtype="Float32"),
+    "nullable_bool": Index(np.arange(100).astype(bool), dtype="boolean"),
+    "string-python": Index(pd.array(tm.makeStringIndex(100), dtype="string[python]")),
 }
+if has_pyarrow:
+    idx = Index(pd.array(tm.makeStringIndex(100), dtype="string[pyarrow]"))
+    indices_dict["string-pyarrow"] = idx
 
 
 @pytest.fixture(params=indices_dict.keys())
@@ -521,6 +608,21 @@ index_flat2 = index_flat
     params=[
         key
         for key in indices_dict
+        if not isinstance(indices_dict[key], MultiIndex) and indices_dict[key].is_unique
+    ]
+)
+def index_flat_unique(request):
+    """
+    index_flat with uniqueness requirement.
+    """
+    key = request.param
+    return indices_dict[key].copy()
+
+
+@pytest.fixture(
+    params=[
+        key
+        for key in indices_dict
         if not (
             key in ["int", "uint", "range", "empty", "repeats"]
             or key.startswith("num_")
@@ -557,11 +659,6 @@ def index_with_missing(request):
 # ----------------------------------------------------------------
 # Series'
 # ----------------------------------------------------------------
-@pytest.fixture
-def empty_series():
-    return Series([], index=[], dtype=np.float64)
-
-
 @pytest.fixture
 def string_series():
     """
@@ -630,29 +727,10 @@ def series_with_multilevel_index():
     return ser
 
 
-_narrow_dtypes = [
-    np.float16,
-    np.float32,
-    np.int8,
-    np.int16,
-    np.int32,
-    np.uint8,
-    np.uint16,
-    np.uint32,
-]
 _narrow_series = {
-    f"{dtype.__name__}-series": tm.makeFloatSeries(name="a").astype(dtype)
-    for dtype in _narrow_dtypes
+    f"{dtype.__name__}-series": tm.make_rand_series(name="a", dtype=dtype)
+    for dtype in tm.NARROW_NP_DTYPES
 }
-
-
-@pytest.fixture(params=_narrow_series.keys())
-def narrow_series(request):
-    """
-    Fixture for Series with low precision data types
-    """
-    # copy to avoid mutation, e.g. setting .name
-    return _narrow_series[request.param].copy()
 
 
 _index_or_series_objs = {**indices_dict, **_series, **_narrow_series}
@@ -670,11 +748,6 @@ def index_or_series_obj(request):
 # ----------------------------------------------------------------
 # DataFrames
 # ----------------------------------------------------------------
-@pytest.fixture
-def empty_frame():
-    return DataFrame()
-
-
 @pytest.fixture
 def int_frame():
     """
@@ -961,17 +1034,19 @@ def all_reductions(request):
     return request.param
 
 
-@pytest.fixture(params=["__eq__", "__ne__", "__le__", "__lt__", "__ge__", "__gt__"])
-def all_compare_operators(request):
+@pytest.fixture(
+    params=[
+        operator.eq,
+        operator.ne,
+        operator.gt,
+        operator.ge,
+        operator.lt,
+        operator.le,
+    ]
+)
+def comparison_op(request):
     """
-    Fixture for dunder names for common compare operations
-
-    * >=
-    * >
-    * ==
-    * !=
-    * <
-    * <=
+    Fixture for operator module comparison functions.
     """
     return request.param
 
@@ -1232,6 +1307,16 @@ def timedelta64_dtype(request):
     return request.param
 
 
+@pytest.fixture
+def fixed_now_ts():
+    """
+    Fixture emits fixed Timestamp.now()
+    """
+    return Timestamp(
+        year=2021, month=1, day=1, hour=12, minute=4, second=13, microsecond=22
+    )
+
+
 @pytest.fixture(params=tm.FLOAT_NUMPY_DTYPES)
 def float_numpy_dtype(request):
     """
@@ -1464,6 +1549,7 @@ def any_numpy_dtype(request):
 _any_skipna_inferred_dtype = [
     ("string", ["a", np.nan, "c"]),
     ("string", ["a", pd.NA, "c"]),
+    ("mixed", ["a", pd.NaT, "c"]),  # pd.NaT not considered valid by is_string_array
     ("bytes", [b"a", np.nan, b"c"]),
     ("empty", [np.nan, np.nan, np.nan]),
     ("empty", []),
@@ -1620,6 +1706,11 @@ def fsspectest():
         ("foo", None, None),
         ("Egon", "Venkman", None),
         ("NCC1701D", "NCC1701D", "NCC1701D"),
+        # possibly-matching NAs
+        (np.nan, np.nan, np.nan),
+        (np.nan, pd.NaT, None),
+        (np.nan, pd.NA, None),
+        (pd.NA, pd.NA, pd.NA),
     ]
 )
 def names(request):
@@ -1657,6 +1748,14 @@ def indexer_sl(request):
 def indexer_al(request):
     """
     Parametrize over at.__setitem__, loc.__setitem__
+    """
+    return request.param
+
+
+@pytest.fixture(params=[tm.iat, tm.iloc])
+def indexer_ial(request):
+    """
+    Parametrize over iat.__setitem__, iloc.__setitem__
     """
     return request.param
 
