@@ -353,9 +353,9 @@ class TestGetIndexer:
             ]
         )
         # sanity check
-        assert mult_idx_1.is_monotonic
+        assert mult_idx_1.is_monotonic_increasing
         assert mult_idx_1.is_unique
-        assert mult_idx_2.is_monotonic
+        assert mult_idx_2.is_monotonic_increasing
         assert mult_idx_2.is_unique
 
         # show the relationships between the two
@@ -790,8 +790,8 @@ class TestContains:
     @pytest.mark.slow
     def test_large_mi_contains(self):
         # GH#10645
-        result = MultiIndex.from_arrays([range(10 ** 6), range(10 ** 6)])
-        assert not (10 ** 6, 0) in result
+        result = MultiIndex.from_arrays([range(10**6), range(10**6)])
+        assert not (10**6, 0) in result
 
 
 def test_timestamp_multiindex_indexer():
